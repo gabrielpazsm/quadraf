@@ -84,6 +84,10 @@ def dashboard_page():
             if not alugueis_df.empty:
                 alugueis_display = alugueis_df.copy()
                 alugueis_display['valor'] = alugueis_display['valor'].map(lambda x: f"R$ {x:,.2f}")
+                # Reorganizar colunas: mostrar dia_semana em vez de data_evento, remover data_criacao, mover id para o fim
+                colunas_ordem = ['dia_semana', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
+                colunas_disponiveis = [col for col in colunas_ordem if col in alugueis_display.columns]
+                alugueis_display = alugueis_display[colunas_disponiveis]
                 st.dataframe(alugueis_display, use_container_width=True)
             else:
                 st.info("Nenhum aluguel registrado neste mês.")
@@ -103,12 +107,23 @@ def dashboard_page():
 def adicionar_aluguel_page():
     st.title("🏟️ Adicionar Aluguel")
 
+    # Generate 30-minute intervals from 6 AM to 10 PM
+    def gerar_intervalos_tempo():
+        intervalos = []
+        for hora in range(6, 23):  # 6 AM to 10 PM
+            for minuto in [0, 30]:
+                if hora == 22 and minuto == 30:  # Skip 22:30 (ends at 22:00)
+                    continue
+                intervalos.append(f"{hora:02d}:{minuto:02d}")
+        return intervalos
+
     with st.form("form_aluguel"):
         col1, col2 = st.columns(2)
 
         with col1:
             data_evento = st.date_input("Data do Evento", value=date.today())
-            horario_inicio = st.time_input("Horário de Início", value=datetime.now().time())
+            intervalos = gerar_intervalos_tempo()
+            horario_inicio = st.selectbox("Horário de Início", intervalos, index=12)  # Default to 12:00
             horas_alugadas = st.number_input("Horas Alugadas", min_value=0.5, max_value=12.0, value=1.0, step=0.5)
 
         with col2:
@@ -130,7 +145,7 @@ def adicionar_aluguel_page():
                     adicionar_aluguel(
                         data_evento=data_evento.strftime('%Y-%m-%d'),
                         dia_semana=dia_semana,
-                        horario_inicio=horario_inicio.strftime('%H:%M'),
+                        horario_inicio=horario_inicio,  # Already in HH:MM format
                         horas_alugadas=horas_alugadas,
                         cliente_time=cliente_time.strip(),
                         valor=valor,
@@ -197,6 +212,10 @@ def ver_lancamentos_page():
                 alugueis_completos = pd.concat(todos_alugueis, ignore_index=True)
                 alugueis_completos = alugueis_completos.sort_values('data_evento')
                 alugueis_completos['valor'] = alugueis_completos['valor'].map(lambda x: f"R$ {x:,.2f}")
+                # Reorganizar colunas: remover dia_semana e data_criacao, mover id para o fim
+                colunas_ordem = ['data_evento', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
+                colunas_disponiveis = [col for col in colunas_ordem if col in alugueis_completos.columns]
+                alugueis_completos = alugueis_completos[colunas_disponiveis]
                 st.dataframe(alugueis_completos, use_container_width=True)
             else:
                 st.info(f"Nenhum aluguel registrado no ano {ano_selecionado}.")
@@ -225,6 +244,96 @@ def ver_lancamentos_page():
         except Exception as e:
             st.error(f"Erro ao carregar transações: {str(e)}")
 
+def editar_status_aluguel_page():
+    st.title("💳 Editar Status de Aluguel")
+    st.markdown("Marque aluguéis como pagos ou atualize seu status.")
+
+    try:
+        todos_alugueis = []
+        ano_atual = date.today().year
+        for mes in range(1, 13):
+            df_aluguel_mes, _ = buscar_dados_do_mes(ano_atual, mes)
+            if not df_aluguel_mes.empty:
+                todos_alugueis.append(df_aluguel_mes)
+
+        if todos_alugueis:
+            alugueis_df = pd.concat(todos_alugueis, ignore_index=True)
+            alugueis_pendentes = alugueis_df[alugueis_df['status'] != 'Pago'].copy()
+
+            if not alugueis_pendentes.empty:
+                st.subheader(f"📋 Aluguéis Pendentes ({len(alugueis_pendentes)})")
+
+                alugueis_pendentes['display_text'] = (
+                    alugueis_pendentes['data_evento'] + ' - ' +
+                    alugueis_pendentes['cliente_time'] + ' - ' +
+                    'R$ ' + alugueis_pendentes['valor'].astype(str) + ' - ' +
+                    alugueis_pendentes['status']
+                )
+
+                aluguel_selecionado = st.selectbox(
+                    "Selecione o aluguel para editar:",
+                    alugueis_pendentes['display_text'].tolist()
+                )
+
+                if aluguel_selecionado:
+                    aluguel_info = alugueis_pendentes[
+                        alugueis_pendentes['display_text'] == aluguel_selecionado
+                    ].iloc[0]
+
+                    st.markdown("### 📝 Detalhes do Aluguel")
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.write(f"**Data:** {aluguel_info['data_evento']}")
+                        st.write(f"**Cliente/Time:** {aluguel_info['cliente_time']}")
+                        st.write(f"**Horário:** {aluguel_info['horario_inicio']}")
+
+                    with col2:
+                        st.write(f"**Valor:** R$ {aluguel_info['valor']:,.2f}")
+                        st.write(f"**Status Atual:** {aluguel_info['status']}")
+                        st.write(f"**Duração:** {aluguel_info['horas_alugadas']}h")
+
+                    st.markdown("---")
+
+                    with st.form("form_editar_status"):
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            novo_status = st.selectbox(
+                                "Novo Status",
+                                obter_status_aluguel(),
+                                index=1
+                            )
+
+                        with col2:
+                            st.write("**Confirmação**")
+                            st.markdown("Deseja atualizar o status deste aluguel?")
+
+                        submitted = st.form_submit_button("✅ Atualizar Status")
+
+                        if submitted:
+                            try:
+                                sucesso = atualizar_status_aluguel(
+                                    int(aluguel_info['id']),
+                                    novo_status
+                                )
+
+                                if sucesso:
+                                    st.success(f"✅ Status do aluguel atualizado para '{novo_status}' com sucesso!")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("❌ Erro ao atualizar o status do aluguel.")
+
+                            except Exception as e:
+                                st.error(f"❌ Erro ao atualizar: {str(e)}")
+            else:
+                st.success("🎉 Todos os aluguéis estão pagos!")
+        else:
+            st.info("Nenhum aluguel registrado no sistema.")
+
+    except Exception as e:
+        st.error(f"Erro ao carregar dados: {str(e)}")
+
 def main():
     with st.sidebar:
         st.title("🏟️ Quadra Financeiro")
@@ -232,7 +341,7 @@ def main():
 
         pagina = st.radio(
             "Navegação",
-            ["Dashboard", "Adicionar Aluguel", "Adicionar Transação", "Ver Todos os Lançamentos"],
+            ["Dashboard", "Adicionar Aluguel", "Adicionar Transação", "Editar Status de Aluguel", "Ver Todos os Lançamentos"],
             index=0
         )
 
@@ -244,9 +353,11 @@ def main():
             alugueis_df, transacoes_df = buscar_dados_do_mes(hoje.year, hoje.month)
 
             total_alugueis_mes = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
+            total_outras_entradas_mes = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
             total_saidas_mes = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
 
             st.metric("Aluguéis esse mês", f"R$ {total_alugueis_mes:,.0f}")
+            st.metric("Outras Entradas esse mês", f"R$ {total_outras_entradas_mes:,.0f}")
             st.metric("Despesas esse mês", f"R$ {total_saidas_mes:,.0f}")
 
         except:
@@ -258,6 +369,8 @@ def main():
         adicionar_aluguel_page()
     elif pagina == "Adicionar Transação":
         adicionar_transacao_page()
+    elif pagina == "Editar Status de Aluguel":
+        editar_status_aluguel_page()
     elif pagina == "Ver Todos os Lançamentos":
         ver_lancamentos_page()
 
