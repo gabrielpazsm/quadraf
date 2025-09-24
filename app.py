@@ -401,7 +401,7 @@ def editar_status_aluguel_page():
 
                                 if sucesso:
                                     st.success(f"✅ Status do aluguel atualizado para '{novo_status}' com sucesso!")
-                                    st.experimental_rerun()
+                                    st.rerun()
                                 else:
                                     st.error("❌ Erro ao atualizar o status do aluguel.")
 
