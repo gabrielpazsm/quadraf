@@ -5,10 +5,29 @@ from database_sheets import (
     inicializar_banco, adicionar_aluguel, adicionar_transacao, buscar_dados_do_mes,
     atualizar_status_aluguel, deletar_registro, gerar_resumo_financeiro,
     obter_dias_semana, obter_meses_referencia, obter_status_aluguel, obter_tipos_transacao,
-    validar_ano, formatar_mes_ano, obter_anos_disponiveis
+    validar_ano, formatar_mes_ano, obter_anos_disponiveis, buscar_dados_do_ano
 )
 
-inicializar_banco()
+def safe_numeric_conversion(series, fill_value=0):
+    """Converte série para tipo numérico de forma segura."""
+    try:
+        return pd.to_numeric(series, errors='coerce').fillna(fill_value)
+    except:
+        return pd.Series([fill_value] * len(series))
+
+def safe_datetime_conversion(series):
+    """Converte série para datetime de forma segura."""
+    try:
+        return pd.to_datetime(series, errors='coerce')
+    except:
+        return pd.Series([pd.NaT] * len(series))
+
+# Initialize database with error handling
+try:
+    inicializar_banco()
+except Exception as e:
+    st.error("❌ Erro ao inicializar o banco de dados. Verifique suas credenciais do Google Sheets.")
+    st.stop()
 
 st.set_page_config(
     page_title="Quadra Financeiro",
@@ -38,10 +57,22 @@ def dashboard_page():
     try:
         alugueis_df, transacoes_df = buscar_dados_do_mes(ano_selecionado, mes_selecionado)
 
-        total_alugueis = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
-        total_alugueis_a_pagar = alugueis_df[alugueis_df['status'] != 'Pago']['valor'].sum()
-        total_outras_entradas = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
-        total_saidas = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
+        # Garantir tipos de dados corretos para cálculos
+        if not alugueis_df.empty:
+            alugueis_df['valor'] = safe_numeric_conversion(alugueis_df['valor'])
+            total_alugueis = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
+            total_alugueis_a_pagar = alugueis_df[alugueis_df['status'] != 'Pago']['valor'].sum()
+        else:
+            total_alugueis = 0
+            total_alugueis_a_pagar = 0
+
+        if not transacoes_df.empty:
+            transacoes_df['valor'] = safe_numeric_conversion(transacoes_df['valor'])
+            total_outras_entradas = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
+            total_saidas = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
+        else:
+            total_outras_entradas = 0
+            total_saidas = 0
 
         total_entradas = total_alugueis + total_outras_entradas
         saldo_final = total_entradas - total_saidas
@@ -218,18 +249,30 @@ def ver_lancamentos_page():
 
     if tipo_visualizacao == "Aluguéis":
         try:
-            alugueis_df, _ = buscar_dados_do_mes(ano_selecionado, 1)
+            # Use optimized single API call for yearly data
+            dados_ano = buscar_dados_do_ano(ano_selecionado)
 
             todos_alugueis = []
             for mes in range(1, 13):
-                df_aluguel_mes, _ = buscar_dados_do_mes(ano_selecionado, mes)
+                df_aluguel_mes, _ = dados_ano[mes]
                 if not df_aluguel_mes.empty:
                     todos_alugueis.append(df_aluguel_mes)
 
             if todos_alugueis:
                 alugueis_completos = pd.concat(todos_alugueis, ignore_index=True)
-                alugueis_completos = alugueis_completos.sort_values('mes_referencia')
+
+                # Garantir que mes_referencia seja string para ordenação correta
+                alugueis_completos['mes_referencia'] = alugueis_completos['mes_referencia'].astype(str)
+
+                # Ordenação segura
+                try:
+                    alugueis_completos = alugueis_completos.sort_values('mes_referencia')
+                except Exception as sort_error:
+                    st.warning(f"⚠️ Erro ao ordenar dados: {sort_error}")
+
+                # Formatar para display APÓS todas as operações de dados
                 alugueis_completos['valor'] = alugueis_completos['valor'].map(lambda x: f"R$ {x:,.2f}")
+
                 # Reorganizar colunas: mostrar mes_referencia e dia_semana, remover data_criacao, mover id para o fim
                 colunas_ordem = ['mes_referencia', 'dia_semana', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
                 colunas_disponiveis = [col for col in colunas_ordem if col in alugueis_completos.columns]
@@ -243,17 +286,30 @@ def ver_lancamentos_page():
 
     else:
         try:
-            _, transacoes_df = buscar_dados_do_mes(ano_selecionado, 1)
+            # Use optimized single API call for yearly data
+            dados_ano = buscar_dados_do_ano(ano_selecionado)
 
             todas_transacoes = []
             for mes in range(1, 13):
-                _, df_transacao_mes = buscar_dados_do_mes(ano_selecionado, mes)
+                _, df_transacao_mes = dados_ano[mes]
                 if not df_transacao_mes.empty:
                     todas_transacoes.append(df_transacao_mes)
 
             if todas_transacoes:
                 transacoes_completas = pd.concat(todas_transacoes, ignore_index=True)
-                transacoes_completas = transacoes_completas.sort_values('data_transacao')
+
+                # Garantir que data_transacao seja datetime para ordenação correta
+                transacoes_completas['data_transacao'] = safe_datetime_conversion(transacoes_completas['data_transacao'])
+
+                # Ordenação segura - remover datas inválidas antes de ordenar
+                try:
+                    transacoes_validas = transacoes_completas[transacoes_completas['data_transacao'].notna()]
+                    if not transacoes_validas.empty:
+                        transacoes_completas = transacoes_validas.sort_values('data_transacao')
+                except Exception as sort_error:
+                    st.warning(f"⚠️ Erro ao ordenar transações: {sort_error}")
+
+                # Formatar para display APÓS todas as operações de dados
                 transacoes_completas['valor'] = transacoes_completas['valor'].map(lambda x: f"R$ {x:,.2f}")
                 st.dataframe(transacoes_completas, use_container_width=True)
             else:
@@ -267,10 +323,13 @@ def editar_status_aluguel_page():
     st.markdown("Marque aluguéis como pagos ou atualize seu status.")
 
     try:
+        # Use optimized single API call for yearly data
         todos_alugueis = []
         ano_atual = date.today().year
+        dados_ano = buscar_dados_do_ano(ano_atual)
+
         for mes in range(1, 13):
-            df_aluguel_mes, _ = buscar_dados_do_mes(ano_atual, mes)
+            df_aluguel_mes, _ = dados_ano[mes]
             if not df_aluguel_mes.empty:
                 todos_alugueis.append(df_aluguel_mes)
 
@@ -281,22 +340,24 @@ def editar_status_aluguel_page():
             if not alugueis_pendentes.empty:
                 st.subheader(f"📋 Aluguéis Pendentes ({len(alugueis_pendentes)})")
 
-                alugueis_pendentes['display_text'] = (
-                    alugueis_pendentes['mes_referencia'] + ' - ' +
-                    alugueis_pendentes['dia_semana'] + ' - ' +
-                    alugueis_pendentes['cliente_time'] + ' - ' +
-                    'R$ ' + alugueis_pendentes['valor'].astype(str) + ' - ' +
-                    alugueis_pendentes['status']
+                # Criar cópia para display para não afetar os dados originais
+                display_df = alugueis_pendentes.copy()
+                display_df['display_text'] = (
+                    display_df['mes_referencia'] + ' - ' +
+                    display_df['dia_semana'] + ' - ' +
+                    display_df['cliente_time'] + ' - ' +
+                    'R$ ' + display_df['valor'].astype(str) + ' - ' +
+                    display_df['status']
                 )
 
                 aluguel_selecionado = st.selectbox(
                     "Selecione o aluguel para editar:",
-                    alugueis_pendentes['display_text'].tolist()
+                    display_df['display_text'].tolist()
                 )
 
                 if aluguel_selecionado:
                     aluguel_info = alugueis_pendentes[
-                        alugueis_pendentes['display_text'] == aluguel_selecionado
+                        display_df['display_text'] == aluguel_selecionado
                     ].iloc[0]
 
                     st.markdown("### 📝 Detalhes do Aluguel")
@@ -372,16 +433,30 @@ def main():
             hoje = date.today()
             alugueis_df, transacoes_df = buscar_dados_do_mes(hoje.year, hoje.month)
 
-            total_alugueis_mes = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
-            total_outras_entradas_mes = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
-            total_saidas_mes = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
+            # Garantir tipos de dados corretos para cálculos
+            if not alugueis_df.empty:
+                alugueis_df['valor'] = safe_numeric_conversion(alugueis_df['valor'])
+                total_alugueis_mes = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
+            else:
+                total_alugueis_mes = 0
+
+            if not transacoes_df.empty:
+                transacoes_df['valor'] = safe_numeric_conversion(transacoes_df['valor'])
+                total_outras_entradas_mes = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
+                total_saidas_mes = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
+            else:
+                total_outras_entradas_mes = 0
+                total_saidas_mes = 0
 
             st.metric("Aluguéis esse mês", f"R$ {total_alugueis_mes:,.0f}")
             st.metric("Outras Entradas esse mês", f"R$ {total_outras_entradas_mes:,.0f}")
             st.metric("Despesas esse mês", f"R$ {total_saidas_mes:,.0f}")
 
-        except:
-            st.write("Dados não disponíveis")
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower() or "limite" in str(e).lower():
+                st.warning("⚠️ Limite da API atingido. Tente novamente em alguns instantes.")
+            else:
+                st.write("Dados não disponíveis")
 
     if pagina == "Dashboard":
         dashboard_page()
