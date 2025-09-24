@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from database import (
+from database_sheets import (
     inicializar_banco, adicionar_aluguel, adicionar_transacao, buscar_dados_do_mes,
     atualizar_status_aluguel, deletar_registro, gerar_resumo_financeiro,
-    obter_dias_semana, obter_status_aluguel, obter_tipos_transacao
+    obter_dias_semana, obter_meses_referencia, obter_status_aluguel, obter_tipos_transacao,
+    validar_ano, formatar_mes_ano, obter_anos_disponiveis
 )
 
 inicializar_banco()
@@ -16,9 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-def get_dia_semana_from_data(data):
-    dias_semana = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo']
-    return dias_semana[data.weekday()]
 
 def dashboard_page():
     st.title("🏟️ Dashboard Financeiro")
@@ -84,8 +82,8 @@ def dashboard_page():
             if not alugueis_df.empty:
                 alugueis_display = alugueis_df.copy()
                 alugueis_display['valor'] = alugueis_display['valor'].map(lambda x: f"R$ {x:,.2f}")
-                # Reorganizar colunas: mostrar dia_semana em vez de data_evento, remover data_criacao, mover id para o fim
-                colunas_ordem = ['dia_semana', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
+                # Reorganizar colunas: mostrar mes_referencia e dia_semana, remover data_criacao, mover id para o fim
+                colunas_ordem = ['mes_referencia', 'dia_semana', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
                 colunas_disponiveis = [col for col in colunas_ordem if col in alugueis_display.columns]
                 alugueis_display = alugueis_display[colunas_disponiveis]
                 st.dataframe(alugueis_display, use_container_width=True)
@@ -121,7 +119,21 @@ def adicionar_aluguel_page():
         col1, col2 = st.columns(2)
 
         with col1:
-            data_evento = st.date_input("Data do Evento", value=date.today())
+            dia_semana = st.selectbox("Dia da Semana", obter_dias_semana())
+
+            # Separar mês e ano
+            col_mes, col_ano = st.columns(2)
+
+            with col_mes:
+                mes_selecionado = st.selectbox("Mês", list(range(1, 13)), format_func=lambda x: f"{x:02d}", index=date.today().month - 1)
+
+            with col_ano:
+                ano_input = st.text_input("Ano", value=str(date.today().year), max_chars=4, key="ano_input")
+
+            # Validação do ano em tempo real
+            if ano_input and not validar_ano(ano_input):
+                st.error("Ano inválido! Deve ter 4 dígitos e começar com 20 (ex: 2024)")
+
             intervalos = gerar_intervalos_tempo()
             horario_inicio = st.selectbox("Horário de Início", intervalos, index=12)  # Default to 12:00
             horas_alugadas = st.number_input("Horas Alugadas", min_value=0.5, max_value=12.0, value=1.0, step=0.5)
@@ -131,20 +143,26 @@ def adicionar_aluguel_page():
             valor = st.number_input("Valor (R$)", min_value=0.0, value=50.0, step=10.0)
             status = st.selectbox("Status", obter_status_aluguel())
 
-        dia_semana = get_dia_semana_from_data(data_evento)
-
         submitted = st.form_submit_button("Salvar Aluguel")
 
         if submitted:
+            # Validações
             if not cliente_time.strip():
                 st.error("Por favor, informe o nome do cliente/time.")
             elif valor <= 0:
                 st.error("O valor deve ser maior que zero.")
+            elif not ano_input:
+                st.error("Por favor, informe o ano.")
+            elif not validar_ano(ano_input):
+                st.error("Ano inválido! Deve ter 4 dígitos e começar com 20 (ex: 2024).")
             else:
                 try:
+                    # Formatar mês e ano no formato MM/YYYY
+                    mes_referencia = formatar_mes_ano(mes_selecionado, ano_input)
+
                     adicionar_aluguel(
-                        data_evento=data_evento.strftime('%Y-%m-%d'),
                         dia_semana=dia_semana,
+                        mes_referencia=mes_referencia,
                         horario_inicio=horario_inicio,  # Already in HH:MM format
                         horas_alugadas=horas_alugadas,
                         cliente_time=cliente_time.strip(),
@@ -210,10 +228,10 @@ def ver_lancamentos_page():
 
             if todos_alugueis:
                 alugueis_completos = pd.concat(todos_alugueis, ignore_index=True)
-                alugueis_completos = alugueis_completos.sort_values('data_evento')
+                alugueis_completos = alugueis_completos.sort_values('mes_referencia')
                 alugueis_completos['valor'] = alugueis_completos['valor'].map(lambda x: f"R$ {x:,.2f}")
-                # Reorganizar colunas: remover dia_semana e data_criacao, mover id para o fim
-                colunas_ordem = ['data_evento', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
+                # Reorganizar colunas: mostrar mes_referencia e dia_semana, remover data_criacao, mover id para o fim
+                colunas_ordem = ['mes_referencia', 'dia_semana', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'id']
                 colunas_disponiveis = [col for col in colunas_ordem if col in alugueis_completos.columns]
                 alugueis_completos = alugueis_completos[colunas_disponiveis]
                 st.dataframe(alugueis_completos, use_container_width=True)
@@ -264,7 +282,8 @@ def editar_status_aluguel_page():
                 st.subheader(f"📋 Aluguéis Pendentes ({len(alugueis_pendentes)})")
 
                 alugueis_pendentes['display_text'] = (
-                    alugueis_pendentes['data_evento'] + ' - ' +
+                    alugueis_pendentes['mes_referencia'] + ' - ' +
+                    alugueis_pendentes['dia_semana'] + ' - ' +
                     alugueis_pendentes['cliente_time'] + ' - ' +
                     'R$ ' + alugueis_pendentes['valor'].astype(str) + ' - ' +
                     alugueis_pendentes['status']
@@ -284,11 +303,12 @@ def editar_status_aluguel_page():
                     col1, col2 = st.columns(2)
 
                     with col1:
-                        st.write(f"**Data:** {aluguel_info['data_evento']}")
+                        st.write(f"**Mês de Referência:** {aluguel_info['mes_referencia']}")
+                        st.write(f"**Dia da Semana:** {aluguel_info['dia_semana']}")
                         st.write(f"**Cliente/Time:** {aluguel_info['cliente_time']}")
-                        st.write(f"**Horário:** {aluguel_info['horario_inicio']}")
 
                     with col2:
+                        st.write(f"**Horário:** {aluguel_info['horario_inicio']}")
                         st.write(f"**Valor:** R$ {aluguel_info['valor']:,.2f}")
                         st.write(f"**Status Atual:** {aluguel_info['status']}")
                         st.write(f"**Duração:** {aluguel_info['horas_alugadas']}h")

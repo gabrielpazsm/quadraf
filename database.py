@@ -13,8 +13,8 @@ def inicializar_banco():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS alugueis (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data_evento TEXT NOT NULL,
             dia_semana TEXT NOT NULL,
+            mes_referencia TEXT NOT NULL,
             horario_inicio TEXT NOT NULL,
             horas_alugadas REAL NOT NULL,
             cliente_time TEXT NOT NULL,
@@ -39,7 +39,7 @@ def inicializar_banco():
     conn.commit()
     conn.close()
 
-def adicionar_aluguel(data_evento: str, dia_semana: str, horario_inicio: str,
+def adicionar_aluguel(dia_semana: str, mes_referencia: str, horario_inicio: str,
                      horas_alugadas: float, cliente_time: str, valor: float, status: str) -> int:
     """Adiciona um novo registro de aluguel ao banco de dados."""
     conn = sqlite3.connect(DB_FILE)
@@ -47,9 +47,9 @@ def adicionar_aluguel(data_evento: str, dia_semana: str, horario_inicio: str,
 
     try:
         cursor.execute('''
-            INSERT INTO alugueis (data_evento, dia_semana, horario_inicio, horas_alugadas, cliente_time, valor, status)
+            INSERT INTO alugueis (dia_semana, mes_referencia, horario_inicio, horas_alugadas, cliente_time, valor, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (data_evento, dia_semana, horario_inicio, horas_alugadas, cliente_time, valor, status))
+        ''', (dia_semana, mes_referencia, horario_inicio, horas_alugadas, cliente_time, valor, status))
 
         conn.commit()
         return cursor.lastrowid
@@ -89,8 +89,8 @@ def buscar_dados_do_mes(ano: int, mes: int) -> Tuple[pd.DataFrame, pd.DataFrame]
     try:
         alugueis_query = '''
             SELECT * FROM alugueis
-            WHERE strftime('%Y', data_evento) = ? AND strftime('%m', data_evento) = ?
-            ORDER BY data_evento, horario_inicio
+            WHERE strftime('%Y', mes_referencia) = ? AND strftime('%m', mes_referencia) = ?
+            ORDER BY mes_referencia, dia_semana, horario_inicio
         '''
 
         transacoes_query = '''
@@ -151,7 +151,7 @@ def gerar_resumo_financeiro(ano: int, mes: int) -> dict:
                 COUNT(*) as total_alugueis,
                 SUM(horas_alugadas) as total_horas
             FROM alugueis
-            WHERE strftime('%Y', data_evento) = ? AND strftime('%m', data_evento) = ?
+            WHERE strftime('%Y', mes_referencia) = ? AND strftime('%m', mes_referencia) = ?
         '''
 
         transacoes_query = '''
@@ -176,6 +176,21 @@ def gerar_resumo_financeiro(ano: int, mes: int) -> dict:
 def obter_dias_semana() -> list:
     """Retorna a lista de dias da semana para formulários."""
     return ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo']
+
+def obter_meses_referencia() -> list:
+    """Retorna lista de meses de referência no formato YYYY-MM."""
+    from datetime import datetime, timedelta
+
+    meses = []
+    data_atual = datetime.now()
+
+    # Gera os últimos 12 meses e próximos 6 meses
+    for i in range(-12, 7):
+        data = data_atual.replace(day=1) + timedelta(days=32 * i)
+        data = data.replace(day=1)
+        meses.append(data.strftime('%Y-%m'))
+
+    return meses
 
 def obter_status_aluguel() -> list:
     """Retorna a lista de status possíveis para alugueis."""
