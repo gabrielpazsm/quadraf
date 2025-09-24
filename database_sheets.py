@@ -23,9 +23,9 @@ class GoogleSheetsDatabase:
 
         # Cache system to reduce API calls
         self.cache = {}
-        self.cache_ttl = 300  # 5 minutes cache TTL
+        self.cache_ttl = 60  # 1 minute cache TTL (reduced from 30 minutes)
         self.last_api_call = 0
-        self.min_api_interval = 1.0  # Minimum seconds between API calls
+        self.min_api_interval = 0.1  # Minimum seconds between API calls (reduced from 1.0s)
 
         self._authenticate()
 
@@ -136,6 +136,7 @@ class GoogleSheetsDatabase:
 
     def _retry_with_backoff(self, func, *args, max_retries=3, **kwargs):
         """Retry function call with exponential backoff."""
+        import random
         for attempt in range(max_retries):
             try:
                 self._rate_limit()
@@ -145,7 +146,11 @@ class GoogleSheetsDatabase:
                     if attempt == max_retries - 1:
                         raise
 
-                    wait_time = (2 ** attempt) * self.min_api_interval
+                    # Add jitter to prevent thundering herd
+                    base_wait = (1.5 ** attempt) * self.min_api_interval
+                    jitter = random.uniform(0.1, 0.5)
+                    wait_time = base_wait + jitter
+
                     print(f"Rate limit hit, waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}")
                     time.sleep(wait_time)
                 else:
@@ -204,17 +209,32 @@ class GoogleSheetsDatabase:
             if cached_id:
                 return cached_id
 
-            # Get data with retry logic
-            data = self._retry_with_backoff(worksheet.get_all_values)
-            if len(data) <= 1:  # Apenas cabeçalho
-                next_id = 1
-            else:
-                # Encontrar maior ID existente
-                max_id = 0
-                for row in data[1:]:  # Pular cabeçalho
-                    if row and row[0].isdigit():
-                        max_id = max(max_id, int(row[0]))
-                next_id = max_id + 1
+            # Get data with retry logic - use batch_get for better performance
+            try:
+                # Try to get just the first column with IDs
+                id_range = f"A2:A{worksheet.row_count}"  # Get all IDs from column A
+                id_data = self._retry_with_backoff(worksheet.batch_get, [id_range])
+
+                if id_data and id_data[0]:
+                    max_id = 0
+                    for row in id_data[0]:
+                        if row and row[0] and row[0].isdigit():
+                            max_id = max(max_id, int(row[0]))
+                    next_id = max_id + 1
+                else:
+                    next_id = 1
+            except:
+                # Fallback to get_all_values if batch_get fails
+                data = self._retry_with_backoff(worksheet.get_all_values)
+                if len(data) <= 1:  # Apenas cabeçalho
+                    next_id = 1
+                else:
+                    # Encontrar maior ID existente
+                    max_id = 0
+                    for row in data[1:]:  # Pular cabeçalho
+                        if row and row[0].isdigit():
+                            max_id = max(max_id, int(row[0]))
+                    next_id = max_id + 1
 
             # Cache the result
             self._cache_data(cache_key, next_id)
@@ -255,13 +275,22 @@ class GoogleSheetsDatabase:
                     horas_alugadas, cliente_time, valor, status, data_criacao
                 ]
 
-                # Use retry logic for append operation
-                self._retry_with_backoff(self.alugueis_worksheet.append_row, row)
+                # Use retry logic for append operation - try batch_append if available
+                try:
+                    # Try to use batch append for better performance
+                    self._retry_with_backoff(self.alugueis_worksheet.append_rows, [row])
+                except AttributeError:
+                    # Fallback to single row append if batch_append not available
+                    self._retry_with_backoff(self.alugueis_worksheet.append_row, row)
 
                 # Invalidate cache when adding new data
                 self._invalidate_cache("alugueis")
+                self._invalidate_cache("transacoes")
                 self._invalidate_cache("next_id")
                 self._invalidate_cache("resumo")
+                self._invalidate_cache("dados_mes")
+                self._invalidate_cache("todos_dados")
+                self._invalidate_cache("sidebar_resumo")
 
                 return next_id
         except Exception as e:
@@ -295,13 +324,39 @@ class GoogleSheetsDatabase:
 
                 row = [next_id, data_transacao, tipo, descricao, valor, observacao or '', data_criacao]
 
-                # Use retry logic for append operation
-                self._retry_with_backoff(self.transacoes_worksheet.append_row, row)
+                # Use retry logic for append operation - try batch_append if available
+                try:
+                    # Try to use batch append for better performance
+                    self._retry_with_backoff(self.transacoes_worksheet.append_rows, [row])
+                except AttributeError:
+                    # Fallback to single row append if batch_append not available
+                    self._retry_with_backoff(self.transacoes_worksheet.append_row, row)
 
                 # Invalidate cache when adding new data
                 self._invalidate_cache("transacoes")
+                self._invalidate_cache("alugueis")
                 self._invalidate_cache("next_id")
                 self._invalidate_cache("resumo")
+                self._invalidate_cache("dados_mes")
+                self._invalidate_cache("todos_dados")
+                self._invalidate_cache("sidebar_resumo")
+
+                # Verificação de consistência - tentar ler a transação recém-adicionada
+                try:
+                    time.sleep(0.2)  # Pequeno delay para garantir processamento
+                    verification_data = self._retry_with_backoff(self.transacoes_worksheet.get_all_values)
+                    if len(verification_data) > 1:
+                        # Verificar se a última linha corresponde à transação adicionada
+                        last_row = verification_data[-1]
+                        if (len(last_row) >= 4 and
+                            last_row[2] == tipo and  # coluna tipo
+                            last_row[3] == descricao and  # coluna descrição
+                            str(last_row[4]) == str(valor)):  # coluna valor
+                            pass  # Verificação bem-sucedida
+                        else:
+                            print(f"AVISO: Verificação de consistência falhou para transação {next_id}")
+                except:
+                    print("AVISO: Não foi possível verificar consistência da transação adicionada")
 
                 return next_id
         except Exception as e:
@@ -408,26 +463,57 @@ class GoogleSheetsDatabase:
                 raise Exception("Worksheet de alugueis não disponível. Verifique a conexão com Google Sheets.")
             print(f"DEBUG: Atualizando status do aluguel {id_aluguel} para '{novo_status}'")
 
-            # Get data with retry logic
-            data = self._retry_with_backoff(self.alugueis_worksheet.get_all_values)
-            if len(data) <= 1:
-                return False
+            # Get data with retry logic - try selective reading first
+            try:
+                # Try to find the row with matching ID using batch_get
+                id_range = f"A2:A{self.alugueis_worksheet.row_count}"  # Get all IDs
+                id_data = self._retry_with_backoff(self.alugueis_worksheet.batch_get, [id_range])
 
-            headers = data[0]
-            id_col = headers.index('id')
-            status_col = headers.index('status')
+                if id_data and id_data[0]:
+                    for i, row in enumerate(id_data[0], start=2):
+                        if row and row[0] == str(id_aluguel):
+                            # Found the row, now update it
+                            headers = ['id', 'dia_semana', 'mes_referencia', 'horario_inicio', 'horas_alugadas', 'cliente_time', 'valor', 'status', 'data_criacao']
+                            status_col = headers.index('status')
 
-            for i, row in enumerate(data[1:], start=2):  # Começar da linha 2
-                if row[id_col] == str(id_aluguel):
-                    # Use retry logic for update operation
-                    self._retry_with_backoff(self.alugueis_worksheet.update_cell, i, status_col + 1, novo_status)
+                            # Use retry logic for update operation
+                            self._retry_with_backoff(self.alugueis_worksheet.update_cell, i, status_col + 1, novo_status)
 
-                    # Invalidate cache when updating data
-                    self._invalidate_cache("alugueis")
-                    self._invalidate_cache("dados_mes")
-                    self._invalidate_cache("resumo")
+                            # Invalidate cache when updating data
+                            self._invalidate_cache("alugueis")
+                            self._invalidate_cache("transacoes")
+                            self._invalidate_cache("dados_mes")
+                            self._invalidate_cache("resumo")
+                            self._invalidate_cache("todos_dados")
+                            self._invalidate_cache("next_id")
+                            self._invalidate_cache("sidebar_resumo")
 
-                    return True
+                            return True
+            except:
+                # Fallback to full scan if batch_get fails
+                data = self._retry_with_backoff(self.alugueis_worksheet.get_all_values)
+                if len(data) <= 1:
+                    return False
+
+                headers = data[0]
+                id_col = headers.index('id')
+                status_col = headers.index('status')
+
+                for i, row in enumerate(data[1:], start=2):  # Começar da linha 2
+                    if row[id_col] == str(id_aluguel):
+                        # Use retry logic for update operation
+                        self._retry_with_backoff(self.alugueis_worksheet.update_cell, i, status_col + 1, novo_status)
+
+                        # Invalidate cache when updating data
+                        self._invalidate_cache("alugueis")
+                        self._invalidate_cache("transacoes")
+                        self._invalidate_cache("dados_mes")
+                        self._invalidate_cache("resumo")
+                        self._invalidate_cache("todos_dados")
+                        self._invalidate_cache("next_id")
+                        self._invalidate_cache("sidebar_resumo")
+
+                        return True
 
             return False
         except Exception as e:
@@ -451,26 +537,46 @@ class GoogleSheetsDatabase:
             if worksheet is None:
                 raise Exception("Worksheet não disponível. Verifique a conexão com Google Sheets.")
 
-            # Get data with retry logic
-            data = self._retry_with_backoff(worksheet.get_all_values)
-            if len(data) <= 1:
-                return False
+            # Get data with retry logic - try selective reading first
+            try:
+                # Try to find the row with matching ID using batch_get
+                id_range = f"A2:A{worksheet.row_count}"  # Get all IDs
+                id_data = self._retry_with_backoff(worksheet.batch_get, [id_range])
 
-            headers = data[0]
-            id_col = headers.index('id')
+                if id_data and id_data[0]:
+                    for i, row in enumerate(id_data[0], start=2):
+                        if row and row[0] == str(id_registro):
+                            # Found the row, now delete it
+                            self._retry_with_backoff(worksheet.delete_rows, i)
 
-            for i, row in enumerate(data[1:], start=2):
-                if row[id_col] == str(id_registro):
-                    # Use retry logic for delete operation
-                    self._retry_with_backoff(worksheet.delete_rows, i)
+                            # Invalidate cache when deleting data
+                            self._invalidate_cache(cache_pattern)
+                            self._invalidate_cache("dados_mes")
+                            self._invalidate_cache("resumo")
+                            self._invalidate_cache("next_id")
 
-                    # Invalidate cache when deleting data
-                    self._invalidate_cache(cache_pattern)
-                    self._invalidate_cache("dados_mes")
-                    self._invalidate_cache("resumo")
-                    self._invalidate_cache("next_id")
+                            return True
+            except:
+                # Fallback to full scan if batch_get fails
+                data = self._retry_with_backoff(worksheet.get_all_values)
+                if len(data) <= 1:
+                    return False
 
-                    return True
+                headers = data[0]
+                id_col = headers.index('id')
+
+                for i, row in enumerate(data[1:], start=2):
+                    if row[id_col] == str(id_registro):
+                        # Use retry logic for delete operation
+                        self._retry_with_backoff(worksheet.delete_rows, i)
+
+                        # Invalidate cache when deleting data
+                        self._invalidate_cache(cache_pattern)
+                        self._invalidate_cache("dados_mes")
+                        self._invalidate_cache("resumo")
+                        self._invalidate_cache("next_id")
+
+                        return True
 
             return False
         except Exception as e:
@@ -521,6 +627,10 @@ class GoogleSheetsDatabase:
 
             # Cache the result
             self._cache_data(cache_key, result)
+
+            # Also cache for sidebar (using same data)
+            sidebar_cache_key = self._get_cache_key("sidebar_resumo", ano, mes)
+            self._cache_data(sidebar_cache_key, result)
 
             return result
         except Exception as e:

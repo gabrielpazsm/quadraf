@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, date
 from database_sheets import (
     inicializar_banco, adicionar_aluguel, adicionar_transacao, buscar_dados_do_mes,
@@ -131,7 +132,15 @@ def dashboard_page():
                 st.info("Nenhuma transação registrada neste mês.")
 
     except Exception as e:
-        st.error(f"Erro ao carregar dados: {str(e)}")
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower() or "limite" in error_msg.lower():
+            st.error("⚠️ Limite da API atingido. Tente novamente em alguns instantes.")
+            if st.button("Tentar novamente"):
+                st.rerun()
+        else:
+            st.error(f"Erro ao carregar dados: {error_msg}")
+            if st.button("Tentar novamente"):
+                st.rerun()
 
 def adicionar_aluguel_page():
     st.title("🏟️ Adicionar Aluguel")
@@ -201,8 +210,13 @@ def adicionar_aluguel_page():
                         status=status
                     )
                     st.success("✅ Aluguel registrado com sucesso!")
+                    time.sleep(0.5)  # Pequeno delay para garantir que o Google Sheets processe
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar aluguel: {str(e)}")
+                    # Adicionar botão para tentar novamente
+                    if st.button("Tentar novamente"):
+                        st.rerun()
 
 def adicionar_transacao_page():
     st.title("💰 Adicionar Transação")
@@ -236,8 +250,13 @@ def adicionar_transacao_page():
                         observacao=observacao.strip() if observacao.strip() else None
                     )
                     st.success("✅ Transação registrada com sucesso!")
+                    time.sleep(0.5)  # Pequeno delay para garantir que o Google Sheets processe
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar transação: {str(e)}")
+                    # Adicionar botão para tentar novamente
+                    if st.button("Tentar novamente"):
+                        st.rerun()
 
 def ver_lancamentos_page():
     st.title("📋 Todos os Lançamentos")
@@ -401,6 +420,7 @@ def editar_status_aluguel_page():
 
                                 if sucesso:
                                     st.success(f"✅ Status do aluguel atualizado para '{novo_status}' com sucesso!")
+                                    time.sleep(0.5)  # Pequeno delay para garantir que o Google Sheets processe
                                     st.rerun()
                                 else:
                                     st.error("❌ Erro ao atualizar o status do aluguel.")
@@ -413,7 +433,15 @@ def editar_status_aluguel_page():
             st.info("Nenhum aluguel registrado no sistema.")
 
     except Exception as e:
-        st.error(f"Erro ao carregar dados: {str(e)}")
+        error_msg = str(e)
+        if "429" in error_msg or "quota" in error_msg.lower() or "limite" in error_msg.lower():
+            st.error("⚠️ Limite da API atingido. Tente novamente em alguns instantes.")
+            if st.button("Tentar novamente"):
+                st.rerun()
+        else:
+            st.error(f"Erro ao carregar dados: {error_msg}")
+            if st.button("Tentar novamente"):
+                st.rerun()
 
 def main():
     with st.sidebar:
@@ -431,26 +459,26 @@ def main():
 
         try:
             hoje = date.today()
-            alugueis_df, transacoes_df = buscar_dados_do_mes(hoje.year, hoje.month)
+            # Usar gerar_resumo_financeiro para melhor performance e cache
+            resumo = gerar_resumo_financeiro(hoje.year, hoje.month)
 
-            # Garantir tipos de dados corretos para cálculos
-            if not alugueis_df.empty:
-                alugueis_df['valor'] = safe_numeric_conversion(alugueis_df['valor'])
-                total_alugueis_mes = alugueis_df[alugueis_df['status'] == 'Pago']['valor'].sum()
-            else:
-                total_alugueis_mes = 0
+            total_alugueis_mes = resumo['alugueis']['total_pago']
+            total_outras_entradas_mes = resumo['transacoes']['total_entradas']
+            total_saidas_mes = resumo['transacoes']['total_saidas']
 
-            if not transacoes_df.empty:
-                transacoes_df['valor'] = safe_numeric_conversion(transacoes_df['valor'])
-                total_outras_entradas_mes = transacoes_df[transacoes_df['tipo'] == 'Entrada']['valor'].sum()
-                total_saidas_mes = transacoes_df[transacoes_df['tipo'] == 'Saída']['valor'].sum()
-            else:
-                total_outras_entradas_mes = 0
-                total_saidas_mes = 0
+            col1, col2, col3 = st.columns(3)
 
-            st.metric("Aluguéis esse mês", f"R$ {total_alugueis_mes:,.0f}")
-            st.metric("Outras Entradas esse mês", f"R$ {total_outras_entradas_mes:,.0f}")
-            st.metric("Despesas esse mês", f"R$ {total_saidas_mes:,.0f}")
+            with col1:
+                st.metric("Aluguéis esse mês", f"R$ {total_alugueis_mes:,.0f}")
+
+            with col2:
+                st.metric("Outras Entradas", f"R$ {total_outras_entradas_mes:,.0f}")
+
+            with col3:
+                st.metric("Despesas", f"R$ {total_saidas_mes:,.0f}")
+
+            # Mostrar último update
+            st.caption(f"📅 Atualizado: {datetime.now().strftime('%H:%M:%S')}")
 
         except Exception as e:
             if "429" in str(e) or "quota" in str(e).lower() or "limite" in str(e).lower():
